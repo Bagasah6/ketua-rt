@@ -153,7 +153,7 @@ async function handleStats(request, env) {
       ? `date(${WIB_EXPR})`
       : `strftime('%Y-%m', ${WIB_EXPR})`;
 
-  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, timeline, versions] = await Promise.all([
+  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, timeline, versions, retention, maxWeeks] = await Promise.all([
     bind(env.DB.prepare(`
       SELECT
         COUNT(*) AS totalEvents,
@@ -233,6 +233,45 @@ async function handleStats(request, env) {
       FROM events ${f.where}
       GROUP BY version ORDER BY players DESC
     `), f.params).all(),
+    bind(env.DB.prepare(`
+      WITH firsts AS (
+        SELECT client_id, MIN(date(${WIB_EXPR})) AS first_day, COUNT(DISTINCT date(${WIB_EXPR})) AS active_days
+        FROM events GROUP BY client_id
+      ),
+      cohort AS (
+        SELECT
+          fr.client_id,
+          fr.first_day,
+          fr.active_days,
+          MAX(CASE WHEN date(datetime(e.created_at, '+7 hours')) = date(fr.first_day, '+1 day') THEN 1 ELSE 0 END) AS d1,
+          MAX(CASE WHEN date(datetime(e.created_at, '+7 hours')) >= date(fr.first_day, '+7 days') THEN 1 ELSE 0 END) AS d7_plus
+        FROM firsts fr
+        JOIN events e ON e.client_id = fr.client_id
+        GROUP BY fr.client_id, fr.first_day, fr.active_days
+      ),
+      scoped AS (
+        SELECT DISTINCT client_id FROM events ${f.where}
+      )
+      SELECT
+        COUNT(*) AS totalScoped,
+        SUM(CASE WHEN c.active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
+        SUM(CASE WHEN c.active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
+        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
+        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-1 day') AND c.d1 = 1 THEN 1 ELSE 0 END) AS d1Retained,
+        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
+        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-7 days') AND c.d7_plus = 1 THEN 1 ELSE 0 END) AS d7Retained
+      FROM scoped s
+      JOIN cohort c ON c.client_id = s.client_id
+    `), f.params).first(),
+    bind(env.DB.prepare(`
+      SELECT AVG(max_w) AS avgMaxWeek
+      FROM (
+        SELECT client_id, MAX(week) AS max_w
+        FROM events
+        WHERE event_name = 'week_end' AND week IS NOT NULL ${f.andWhere}
+        GROUP BY client_id
+      )
+    `), f.params).first(),
   ]);
 
   return json({
@@ -248,6 +287,8 @@ async function handleStats(request, env) {
     timeSlots: timeSlots.results || [],
     timeline: timeline.results || [],
     versions: versions.results || [],
+    retention: retention || {},
+    avgMaxWeek: maxWeeks && maxWeeks.avgMaxWeek ? Math.round(maxWeeks.avgMaxWeek * 10) / 10 : 0,
   });
 }
 
