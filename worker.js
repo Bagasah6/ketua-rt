@@ -145,6 +145,7 @@ async function handleStats(request, env) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
+  try {
   const url = new URL(request.url);
   const f = buildTimeFilter(url);
   const timelineExpr = f.period === 'day'
@@ -234,34 +235,26 @@ async function handleStats(request, env) {
       GROUP BY version ORDER BY players DESC
     `), f.params).all(),
     bind(env.DB.prepare(`
-      WITH firsts AS (
-        SELECT client_id, MIN(date(${WIB_EXPR})) AS first_day, COUNT(DISTINCT date(${WIB_EXPR})) AS active_days
-        FROM events GROUP BY client_id
-      ),
-      cohort AS (
+      WITH per_player AS (
         SELECT
-          fr.client_id,
-          fr.first_day,
-          fr.active_days,
-          MAX(CASE WHEN date(datetime(e.created_at, '+7 hours')) = date(fr.first_day, '+1 day') THEN 1 ELSE 0 END) AS d1,
-          MAX(CASE WHEN date(datetime(e.created_at, '+7 hours')) >= date(fr.first_day, '+7 days') THEN 1 ELSE 0 END) AS d7_plus
-        FROM firsts fr
-        JOIN events e ON e.client_id = fr.client_id
-        GROUP BY fr.client_id, fr.first_day, fr.active_days
-      ),
-      scoped AS (
-        SELECT DISTINCT client_id FROM events ${f.where}
+          client_id,
+          MIN(date(${WIB_EXPR})) AS first_day,
+          MAX(date(${WIB_EXPR})) AS last_day,
+          COUNT(DISTINCT date(${WIB_EXPR})) AS active_days,
+          GROUP_CONCAT(DISTINCT date(${WIB_EXPR})) AS days_csv
+        FROM events
+        GROUP BY client_id
       )
       SELECT
         COUNT(*) AS totalScoped,
-        SUM(CASE WHEN c.active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
-        SUM(CASE WHEN c.active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
-        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
-        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-1 day') AND c.d1 = 1 THEN 1 ELSE 0 END) AS d1Retained,
-        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
-        SUM(CASE WHEN c.first_day <= date('now', '+7 hours', '-7 days') AND c.d7_plus = 1 THEN 1 ELSE 0 END) AS d7Retained
-      FROM scoped s
-      JOIN cohort c ON c.client_id = s.client_id
+        SUM(CASE WHEN active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
+        SUM(CASE WHEN active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') AND instr(days_csv, date(first_day, '+1 day')) > 0 THEN 1 ELSE 0 END) AS d1Retained,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') AND last_day >= date(first_day, '+7 days') THEN 1 ELSE 0 END) AS d7Retained
+      FROM per_player
+      ${f.where ? `WHERE client_id IN (SELECT DISTINCT client_id FROM events ${f.where})` : ''}
     `), f.params).first(),
     bind(env.DB.prepare(`
       SELECT AVG(max_w) AS avgMaxWeek
@@ -290,6 +283,9 @@ async function handleStats(request, env) {
     retention: retention || {},
     avgMaxWeek: maxWeeks && maxWeeks.avgMaxWeek ? Math.round(maxWeeks.avgMaxWeek * 10) / 10 : 0,
   });
+  } catch (err) {
+    return json({ error: (err && err.message) || 'Stats query error' }, 500);
+  }
 }
 
 export default {

@@ -74,6 +74,7 @@
       <button id="logout" class="sec">Keluar</button>
     </div>
   </div>
+  <div id="err-banner" class="card err" style="margin-top:0" hidden></div>
 
   <div class="card filters">
     <div class="seg" role="tablist" aria-label="Periode">
@@ -170,6 +171,7 @@ async function load() {
   const tok = sessionStorage.getItem(KEY);
   if (!tok) { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth-err').hidden = true;
+  $('err-banner').hidden = true;
   syncFilterUI();
   const qs = new URLSearchParams({ period: state.period, date: state.date, month: state.month, slot: state.slot });
   const res = await fetch('/api/stats?' + qs.toString(), { headers: { authorization: 'Bearer ' + tok } });
@@ -179,7 +181,14 @@ async function load() {
     $('auth-err').textContent = 'Token tidak valid.'; $('auth-err').hidden = false;
     return;
   }
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { const j = await res.json(); if (j && j.error) msg += ' — ' + j.error; } catch {}
+    $('auth').hidden = true; $('app').hidden = false;
+    $('err-banner').textContent = 'Gagal memuat data: ' + msg;
+    $('err-banner').hidden = false;
+    return;
+  }
   const d = await res.json();
   $('auth').hidden = true; $('app').hidden = false;
   const pLabel = state.period === 'day' ? state.date : state.period === 'month' ? state.month : 'All Time';
@@ -285,23 +294,31 @@ async function load() {
     : '<tr><td colspan="4" style="color:var(--muted)">Belum ada masukan.</td></tr>';
 }
 
+const safeLoad = () => load().catch(err => {
+  const hasTok = !!sessionStorage.getItem(KEY);
+  $('auth').hidden = hasTok; $('app').hidden = !hasTok;
+  const el = hasTok ? $('err-banner') : $('auth-err');
+  el.textContent = 'Gagal memuat: ' + (err && err.message || err);
+  el.hidden = false;
+});
+
 document.querySelectorAll('.seg button').forEach(btn => btn.addEventListener('click', () => {
   state.period = btn.dataset.p;
-  load();
+  safeLoad();
 }));
-$('f-date').addEventListener('change', e => { if (e.target.value) { state.date = e.target.value; load(); } });
-$('f-month').addEventListener('change', e => { if (e.target.value) { state.month = e.target.value; load(); } });
-$('f-slot').addEventListener('change', e => { state.slot = e.target.value; load(); });
+$('f-date').addEventListener('change', e => { if (e.target.value) { state.date = e.target.value; safeLoad(); } });
+$('f-month').addEventListener('change', e => { if (e.target.value) { state.month = e.target.value; safeLoad(); } });
+$('f-slot').addEventListener('change', e => { state.slot = e.target.value; safeLoad(); });
 
 $('login-form').addEventListener('submit', e => {
   e.preventDefault();
   sessionStorage.setItem(KEY, $('tok').value.trim());
   $('tok').value = '';
-  load().catch(err => { $('auth-err').textContent = err.message; $('auth-err').hidden = false; });
+  safeLoad();
 });
-$('refresh').addEventListener('click', () => load());
-$('logout').addEventListener('click', () => { sessionStorage.removeItem(KEY); load(); });
-load();
+$('refresh').addEventListener('click', () => safeLoad());
+$('logout').addEventListener('click', () => { sessionStorage.removeItem(KEY); safeLoad(); });
+safeLoad();
 </script>
 </body>
 </html>
