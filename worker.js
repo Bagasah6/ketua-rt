@@ -81,6 +81,62 @@ async function handleTrack(request, env) {
   return new Response(null, { status: 204, headers: { 'access-control-allow-origin': origin } });
 }
 
+const SLOT_RANGES = {
+  dinihari: ['00:00', '06:00'],
+  pagi: ['06:01', '11:00'],
+  siang: ['11:01', '15:00'],
+  sore: ['15:01', '18:00'],
+  malam: ['18:01', '23:59'],
+};
+
+const WIB_EXPR = "datetime(created_at, '+7 hours')";
+
+function buildTimeFilter(url) {
+  const periodParam = url.searchParams.get('period') || 'all';
+  const period = periodParam === 'day' || periodParam === 'month' ? periodParam : 'all';
+  const dateParam = url.searchParams.get('date') || '';
+  const monthParam = url.searchParams.get('month') || '';
+  const slotParam = url.searchParams.get('slot') || 'all';
+  const slot = SLOT_RANGES[slotParam] ? slotParam : 'all';
+
+  const wibNow = new Date(Date.now() + 7 * 3600 * 1000);
+  const defaultDate = wibNow.toISOString().slice(0, 10);
+  const defaultMonth = defaultDate.slice(0, 7);
+
+  const clauses = [];
+  const params = [];
+  const periodClauses = [];
+  const periodParams = [];
+
+  if (period === 'day') {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(dateParam) ? dateParam : defaultDate;
+    periodClauses.push("created_at >= datetime(? || ' 00:00:00', '-7 hours') AND created_at < datetime(? || ' 00:00:00', '+1 day', '-7 hours')");
+    periodParams.push(d, d);
+  } else if (period === 'month') {
+    const m = /^\d{4}-\d{2}$/.test(monthParam) ? monthParam : defaultMonth;
+    periodClauses.push("created_at >= datetime(? || '-01 00:00:00', '-7 hours') AND created_at < datetime(? || '-01 00:00:00', '+1 month', '-7 hours')");
+    periodParams.push(m, m);
+  }
+
+  clauses.push(...periodClauses);
+  params.push(...periodParams);
+
+  if (slot !== 'all') {
+    const [startT, endT] = SLOT_RANGES[slot];
+    clauses.push(`strftime('%H:%M', ${WIB_EXPR}) BETWEEN ? AND ?`);
+    params.push(startT, endT);
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const andWhere = clauses.length ? 'AND ' + clauses.join(' AND ') : '';
+  const periodWhere = periodClauses.length ? 'WHERE ' + periodClauses.join(' AND ') : '';
+  return { period, slot, where, andWhere, params, periodWhere, periodParams };
+}
+
+function bind(stmt, params) {
+  return params.length ? stmt.bind(...params) : stmt;
+}
+
 async function handleStats(request, env) {
   const token = env.ADMIN_TOKEN;
   if (!token) return json({ error: 'ADMIN_TOKEN not configured' }, 503);
@@ -89,8 +145,16 @@ async function handleStats(request, env) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
-  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks] = await Promise.all([
-    env.DB.prepare(`
+  const url = new URL(request.url);
+  const f = buildTimeFilter(url);
+  const timelineExpr = f.period === 'day'
+    ? `strftime('%H', ${WIB_EXPR})`
+    : f.period === 'month'
+      ? `date(${WIB_EXPR})`
+      : `strftime('%Y-%m', ${WIB_EXPR})`;
+
+  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, timeline, versions] = await Promise.all([
+    bind(env.DB.prepare(`
       SELECT
         COUNT(*) AS totalEvents,
         COUNT(DISTINCT client_id) AS uniquePlayers,
@@ -98,56 +162,81 @@ async function handleStats(request, env) {
         COUNT(DISTINCT CASE WHEN event_name = 'game_ending' THEN client_id END) AS completedPlayers,
         SUM(CASE WHEN event_name = 'share_click' THEN 1 ELSE 0 END) AS totalShares,
         SUM(CASE WHEN event_name = 'trakteer_click' THEN 1 ELSE 0 END) AS trakteerClicks
-      FROM events
-    `).first(),
-    env.DB.prepare(`
+      FROM events ${f.where}
+    `), f.params).first(),
+    bind(env.DB.prepare(`
       SELECT COALESCE(device, 'unknown') AS device, COUNT(DISTINCT client_id) AS players
-      FROM events GROUP BY device ORDER BY players DESC
-    `).all(),
-    env.DB.prepare(`
+      FROM events ${f.where} GROUP BY device ORDER BY players DESC
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT COALESCE(json_extract(payload, '$.status'), 'unknown') AS status, COUNT(*) AS count
-      FROM events WHERE event_name = 'tutorial_end' GROUP BY status
-    `).all(),
-    env.DB.prepare(`
+      FROM events WHERE event_name = 'tutorial_end' ${f.andWhere} GROUP BY status
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT week, COUNT(DISTINCT client_id) AS players
-      FROM events WHERE event_name = 'week_end' AND week IS NOT NULL
+      FROM events WHERE event_name = 'week_end' AND week IS NOT NULL ${f.andWhere}
       GROUP BY week ORDER BY week ASC
-    `).all(),
-    env.DB.prepare(`
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT
         json_extract(payload, '$.eventId') AS eventId,
         json_extract(payload, '$.choiceId') AS choiceId,
         COUNT(*) AS count
-      FROM events WHERE event_name = 'event_choice'
+      FROM events WHERE event_name = 'event_choice' ${f.andWhere}
       GROUP BY eventId, choiceId ORDER BY count DESC LIMIT 20
-    `).all(),
-    env.DB.prepare(`
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT
         COALESCE(json_extract(payload, '$.platform'), 'unknown') AS platform,
         COALESCE(json_extract(payload, '$.type'), 'game') AS type,
         COUNT(*) AS count
-      FROM events WHERE event_name = 'share_click'
+      FROM events WHERE event_name = 'share_click' ${f.andWhere}
       GROUP BY platform, type ORDER BY count DESC
-    `).all(),
-    env.DB.prepare(`
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT COALESCE(json_extract(payload, '$.endingId'), 'unknown') AS endingId, COUNT(*) AS count
-      FROM events WHERE event_name = 'game_ending'
+      FROM events WHERE event_name = 'game_ending' ${f.andWhere}
       GROUP BY endingId ORDER BY count DESC
-    `).all(),
-    env.DB.prepare(`
+    `), f.params).all(),
+    bind(env.DB.prepare(`
       SELECT
         id,
         COALESCE(device, 'unknown') AS device,
         COALESCE(version, '') AS version,
         COALESCE(json_extract(payload, '$.category'), 'Umum') AS category,
         COALESCE(json_extract(payload, '$.message'), '') AS message,
-        created_at
-      FROM events WHERE event_name = 'dev_feedback'
+        ${WIB_EXPR} AS created_at
+      FROM events WHERE event_name = 'dev_feedback' ${f.andWhere}
       ORDER BY id DESC LIMIT 50
-    `).all(),
+    `), f.params).all(),
+    bind(env.DB.prepare(`
+      SELECT
+        CASE
+          WHEN strftime('%H:%M', ${WIB_EXPR}) BETWEEN '00:00' AND '06:00' THEN 'dinihari'
+          WHEN strftime('%H:%M', ${WIB_EXPR}) BETWEEN '06:01' AND '11:00' THEN 'pagi'
+          WHEN strftime('%H:%M', ${WIB_EXPR}) BETWEEN '11:01' AND '15:00' THEN 'siang'
+          WHEN strftime('%H:%M', ${WIB_EXPR}) BETWEEN '15:01' AND '18:00' THEN 'sore'
+          ELSE 'malam'
+        END AS slot,
+        COUNT(DISTINCT client_id) AS players,
+        COUNT(*) AS events
+      FROM events ${f.periodWhere}
+      GROUP BY slot
+    `), f.periodParams).all(),
+    bind(env.DB.prepare(`
+      SELECT ${timelineExpr} AS label, COUNT(DISTINCT client_id) AS players, COUNT(*) AS events
+      FROM events ${f.where}
+      GROUP BY label ORDER BY label ASC
+    `), f.params).all(),
+    bind(env.DB.prepare(`
+      SELECT COALESCE(NULLIF(version, ''), 'unknown') AS version, COUNT(DISTINCT client_id) AS players
+      FROM events ${f.where}
+      GROUP BY version ORDER BY players DESC
+    `), f.params).all(),
   ]);
 
   return json({
+    filter: { period: f.period, slot: f.slot },
     summary: summary || {},
     devices: devices.results || [],
     tutorial: tutorial.results || [],
@@ -156,6 +245,9 @@ async function handleStats(request, env) {
     shares: shares.results || [],
     endings: endings.results || [],
     feedbacks: feedbacks.results || [],
+    timeSlots: timeSlots.results || [],
+    timeline: timeline.results || [],
+    versions: versions.results || [],
   });
 }
 
