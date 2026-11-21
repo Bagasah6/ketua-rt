@@ -137,7 +137,9 @@ function bind(stmt, params) {
   return params.length ? stmt.bind(...params) : stmt;
 }
 
-async function handleStats(request, env) {
+const STATS_CACHE_TTL = 600;
+
+async function handleStats(request, env, ctx) {
   const token = env.ADMIN_TOKEN;
   if (!token) return json({ error: 'ADMIN_TOKEN not configured' }, 503);
   const auth = request.headers.get('authorization') || '';
@@ -148,11 +150,74 @@ async function handleStats(request, env) {
   try {
   const url = new URL(request.url);
   const f = buildTimeFilter(url);
+  const fresh = url.searchParams.get('fresh') === '1';
+  const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+  const cacheUrl = `https://stats-cache.ketua-rt.internal/api/stats?period=${f.period}&date=${encodeURIComponent(url.searchParams.get('date') || '')}&month=${encodeURIComponent(url.searchParams.get('month') || '')}&slot=${f.slot}`;
+  const cacheKey = new Request(cacheUrl);
+
+  if (cache && !fresh) {
+    const hit = await cache.match(cacheKey);
+    if (hit) {
+      const hdrs = new Headers(hit.headers);
+      hdrs.set('cache-control', 'no-store');
+      hdrs.set('x-cache', 'HIT');
+      return new Response(hit.body, { status: 200, headers: hdrs });
+    }
+  }
+
   const timelineExpr = f.period === 'day'
     ? `strftime('%H', ${WIB_EXPR})`
     : f.period === 'month'
       ? `date(${WIB_EXPR})`
       : `strftime('%Y-%m', ${WIB_EXPR})`;
+
+  const retentionSql = f.where
+    ? `
+      WITH scoped AS (
+        SELECT DISTINCT client_id FROM events ${f.where}
+      ),
+      per_player AS (
+        SELECT
+          e.client_id,
+          MIN(date(datetime(e.created_at, '+7 hours'))) AS first_day,
+          MAX(date(datetime(e.created_at, '+7 hours'))) AS last_day,
+          COUNT(DISTINCT date(datetime(e.created_at, '+7 hours'))) AS active_days,
+          GROUP_CONCAT(DISTINCT date(datetime(e.created_at, '+7 hours'))) AS days_csv
+        FROM events e
+        WHERE e.client_id IN (SELECT client_id FROM scoped)
+        GROUP BY e.client_id
+      )
+      SELECT
+        COUNT(*) AS totalScoped,
+        SUM(CASE WHEN active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
+        SUM(CASE WHEN active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') AND instr(days_csv, date(first_day, '+1 day')) > 0 THEN 1 ELSE 0 END) AS d1Retained,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') AND last_day >= date(first_day, '+7 days') THEN 1 ELSE 0 END) AS d7Retained
+      FROM per_player
+    `
+    : `
+      WITH per_player AS (
+        SELECT
+          client_id,
+          MIN(date(${WIB_EXPR})) AS first_day,
+          MAX(date(${WIB_EXPR})) AS last_day,
+          COUNT(DISTINCT date(${WIB_EXPR})) AS active_days,
+          GROUP_CONCAT(DISTINCT date(${WIB_EXPR})) AS days_csv
+        FROM events
+        GROUP BY client_id
+      )
+      SELECT
+        COUNT(*) AS totalScoped,
+        SUM(CASE WHEN active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
+        SUM(CASE WHEN active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') AND instr(days_csv, date(first_day, '+1 day')) > 0 THEN 1 ELSE 0 END) AS d1Retained,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
+        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') AND last_day >= date(first_day, '+7 days') THEN 1 ELSE 0 END) AS d7Retained
+      FROM per_player
+    `;
 
   const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, timeline, versions, retention, maxWeeks] = await Promise.all([
     bind(env.DB.prepare(`
@@ -234,28 +299,7 @@ async function handleStats(request, env) {
       FROM events ${f.where}
       GROUP BY version ORDER BY players DESC
     `), f.params).all(),
-    bind(env.DB.prepare(`
-      WITH per_player AS (
-        SELECT
-          client_id,
-          MIN(date(${WIB_EXPR})) AS first_day,
-          MAX(date(${WIB_EXPR})) AS last_day,
-          COUNT(DISTINCT date(${WIB_EXPR})) AS active_days,
-          GROUP_CONCAT(DISTINCT date(${WIB_EXPR})) AS days_csv
-        FROM events
-        GROUP BY client_id
-      )
-      SELECT
-        COUNT(*) AS totalScoped,
-        SUM(CASE WHEN active_days >= 2 THEN 1 ELSE 0 END) AS returningPlayers,
-        SUM(CASE WHEN active_days = 1 THEN 1 ELSE 0 END) AS singleDayPlayers,
-        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') THEN 1 ELSE 0 END) AS d1Eligible,
-        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-1 day') AND instr(days_csv, date(first_day, '+1 day')) > 0 THEN 1 ELSE 0 END) AS d1Retained,
-        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') THEN 1 ELSE 0 END) AS d7Eligible,
-        SUM(CASE WHEN first_day <= date('now', '+7 hours', '-7 days') AND last_day >= date(first_day, '+7 days') THEN 1 ELSE 0 END) AS d7Retained
-      FROM per_player
-      ${f.where ? `WHERE client_id IN (SELECT DISTINCT client_id FROM events ${f.where})` : ''}
-    `), f.params).first(),
+    bind(env.DB.prepare(retentionSql), f.where ? f.params : []).first(),
     bind(env.DB.prepare(`
       SELECT AVG(max_w) AS avgMaxWeek
       FROM (
@@ -267,7 +311,7 @@ async function handleStats(request, env) {
     `), f.params).first(),
   ]);
 
-  return json({
+  const payload = {
     filter: { period: f.period, slot: f.slot },
     summary: summary || {},
     devices: devices.results || [],
@@ -282,6 +326,26 @@ async function handleStats(request, env) {
     versions: versions.results || [],
     retention: retention || {},
     avgMaxWeek: maxWeeks && maxWeeks.avgMaxWeek ? Math.round(maxWeeks.avgMaxWeek * 10) / 10 : 0,
+  };
+  const bodyStr = JSON.stringify(payload);
+  if (cache) {
+    const toCache = new Response(bodyStr, {
+      status: 200,
+      headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': `public, max-age=${STATS_CACHE_TTL}`,
+      },
+    });
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(cache.put(cacheKey, toCache));
+    else await cache.put(cacheKey, toCache);
+  }
+  return new Response(bodyStr, {
+    status: 200,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-cache': 'MISS',
+    },
   });
   } catch (err) {
     return json({ error: (err && err.message) || 'Stats query error' }, 500);
@@ -289,7 +353,7 @@ async function handleStats(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === '/api/track') {
@@ -311,7 +375,7 @@ export default {
     }
 
     if (url.pathname === '/api/stats') {
-      if (request.method === 'GET') return handleStats(request, env);
+      if (request.method === 'GET') return handleStats(request, env, ctx);
       return json({ error: 'Method not allowed' }, 405);
     }
 

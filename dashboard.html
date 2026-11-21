@@ -78,9 +78,9 @@
 
   <div class="card filters">
     <div class="seg" role="tablist" aria-label="Periode">
-      <button type="button" data-p="day">Hari</button>
+      <button type="button" data-p="day" class="active">Hari</button>
       <button type="button" data-p="month">Bulan</button>
-      <button type="button" data-p="all" class="active">All Time</button>
+      <button type="button" data-p="all">All Time</button>
     </div>
     <input id="f-date" type="date" aria-label="Pilih tanggal" hidden>
     <input id="f-month" type="month" aria-label="Pilih bulan" hidden>
@@ -139,7 +139,7 @@ const KEY = 'rt-admin-token';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const wibToday = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10);
-const state = { period: 'all', date: wibToday, month: wibToday.slice(0, 7), slot: 'all' };
+const state = { period: 'day', date: wibToday, month: wibToday.slice(0, 7), slot: 'all' };
 const SLOT_DEFS = [
   ['dinihari', 'Dinihari (00.00-06.00)'],
   ['pagi', 'Pagi (06.01-11.00)'],
@@ -167,13 +167,14 @@ function bars(el, rows, labelFn, countFn, subFn) {
   }).join('') : '<p style="color:var(--muted);font-size:13px">Belum ada data.</p>';
 }
 
-async function load() {
+async function load(fresh = false) {
   const tok = sessionStorage.getItem(KEY);
   if (!tok) { $('auth').hidden = false; $('app').hidden = true; return; }
   $('auth-err').hidden = true;
   $('err-banner').hidden = true;
   syncFilterUI();
   const qs = new URLSearchParams({ period: state.period, date: state.date, month: state.month, slot: state.slot });
+  if (fresh) qs.set('fresh', '1');
   const res = await fetch('/api/stats?' + qs.toString(), { headers: { authorization: 'Bearer ' + tok } });
   if (res.status === 401) {
     sessionStorage.removeItem(KEY);
@@ -189,11 +190,12 @@ async function load() {
     $('err-banner').hidden = false;
     return;
   }
+  const cacheHit = res.headers.get('x-cache') === 'HIT';
   const d = await res.json();
   $('auth').hidden = true; $('app').hidden = false;
   const pLabel = state.period === 'day' ? state.date : state.period === 'month' ? state.month : 'All Time';
   const sLabel = state.slot === 'all' ? 'Semua Jam' : (SLOT_DEFS.find(x => x[0] === state.slot) || [])[1] || state.slot;
-  $('meta').textContent = `${pLabel} · ${sLabel} · Diperbarui ${new Date().toLocaleTimeString('id-ID')}`;
+  $('meta').textContent = `${pLabel} · ${sLabel} · ${cacheHit ? 'cache' : 'live'} · ${new Date().toLocaleTimeString('id-ID')}`;
 
   const s = d.summary || {};
   const tutDone = (d.tutorial.find(x => x.status === 'done') || {}).count || 0;
@@ -294,7 +296,7 @@ async function load() {
     : '<tr><td colspan="4" style="color:var(--muted)">Belum ada masukan.</td></tr>';
 }
 
-const safeLoad = () => load().catch(err => {
+const safeLoad = (fresh = false) => load(fresh).catch(err => {
   const hasTok = !!sessionStorage.getItem(KEY);
   $('auth').hidden = hasTok; $('app').hidden = !hasTok;
   const el = hasTok ? $('err-banner') : $('auth-err');
@@ -316,7 +318,7 @@ $('login-form').addEventListener('submit', e => {
   $('tok').value = '';
   safeLoad();
 });
-$('refresh').addEventListener('click', () => safeLoad());
+$('refresh').addEventListener('click', () => safeLoad(true));
 $('logout').addEventListener('click', () => { sessionStorage.removeItem(KEY); safeLoad(); });
 safeLoad();
 </script>
