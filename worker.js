@@ -5,10 +5,12 @@ const ALLOWED_EVENTS = new Set([
   'event_choice',
   'share_click',
   'game_ending',
+  'dev_feedback',
+  'trakteer_click',
 ]);
 
 const ALLOWED_DEVICES = new Set(['mobile', 'tablet', 'desktop']);
-const MAX_BODY_BYTES = 1024;
+const MAX_BODY_BYTES = 2048;
 
 function isAllowedOrigin(origin) {
   if (!origin) return false;
@@ -61,7 +63,16 @@ async function handleTrack(request, env) {
   const week = Number.isInteger(body.week) && body.week >= 0 && body.week <= 100 ? body.week : null;
   const version = typeof body.version === 'string' ? body.version.slice(0, 16) : null;
   const device = ALLOWED_DEVICES.has(body.device) ? body.device : 'desktop';
-  const payload = body.payload && typeof body.payload === 'object' ? JSON.stringify(body.payload).slice(0, 512) : null;
+  let cleanPayload = body.payload && typeof body.payload === 'object' ? body.payload : null;
+  if (eventName === 'dev_feedback' && cleanPayload) {
+    const allowedCats = new Set(['Saran Fitur', 'Lapor Bug', 'Kritik']);
+    const category = allowedCats.has(cleanPayload.category) ? cleanPayload.category : 'Kritik';
+    const message = typeof cleanPayload.message === 'string' ? cleanPayload.message.trim().slice(0, 400) : '';
+    if (!message) return json({ error: 'Empty feedback' }, 400);
+    cleanPayload = { category, message };
+  }
+  const payloadStr = cleanPayload ? JSON.stringify(cleanPayload) : null;
+  const payload = payloadStr && payloadStr.length <= 1024 ? payloadStr : (payloadStr ? JSON.stringify({ truncated: true }) : null);
 
   await env.DB.prepare(
     'INSERT INTO events (client_id, event_name, week, version, device, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
@@ -78,14 +89,15 @@ async function handleStats(request, env) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
-  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings] = await Promise.all([
+  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks] = await Promise.all([
     env.DB.prepare(`
       SELECT
         COUNT(*) AS totalEvents,
         COUNT(DISTINCT client_id) AS uniquePlayers,
         COUNT(DISTINCT CASE WHEN event_name = 'game_start' THEN client_id END) AS startedPlayers,
         COUNT(DISTINCT CASE WHEN event_name = 'game_ending' THEN client_id END) AS completedPlayers,
-        SUM(CASE WHEN event_name = 'share_click' THEN 1 ELSE 0 END) AS totalShares
+        SUM(CASE WHEN event_name = 'share_click' THEN 1 ELSE 0 END) AS totalShares,
+        SUM(CASE WHEN event_name = 'trakteer_click' THEN 1 ELSE 0 END) AS trakteerClicks
       FROM events
     `).first(),
     env.DB.prepare(`
@@ -122,6 +134,17 @@ async function handleStats(request, env) {
       FROM events WHERE event_name = 'game_ending'
       GROUP BY endingId ORDER BY count DESC
     `).all(),
+    env.DB.prepare(`
+      SELECT
+        id,
+        COALESCE(device, 'unknown') AS device,
+        COALESCE(version, '') AS version,
+        COALESCE(json_extract(payload, '$.category'), 'Umum') AS category,
+        COALESCE(json_extract(payload, '$.message'), '') AS message,
+        created_at
+      FROM events WHERE event_name = 'dev_feedback'
+      ORDER BY id DESC LIMIT 50
+    `).all(),
   ]);
 
   return json({
@@ -132,6 +155,7 @@ async function handleStats(request, env) {
     eventChoices: eventChoices.results || [],
     shares: shares.results || [],
     endings: endings.results || [],
+    feedbacks: feedbacks.results || [],
   });
 }
 

@@ -86,6 +86,11 @@
     <h2>Pilihan Event Populer (Top 20)</h2>
     <table><thead><tr><th>Event</th><th>Pilihan</th><th class="r">Jumlah</th></tr></thead><tbody id="choices"></tbody></table>
   </div>
+
+  <div class="card">
+    <h2>Kritik &amp; Saran Terbaru (50)</h2>
+    <table><thead><tr><th>Waktu</th><th>Kategori</th><th>Pesan</th><th>Device</th></tr></thead><tbody id="feedbacks"></tbody></table>
+  </div>
 </div>
 
 <script>
@@ -128,6 +133,7 @@ async function load() {
     ['Tamat 52 Minggu', s.completedPlayers || 0],
     ['Tutorial Selesai', tutPct],
     ['Total Share', s.totalShares || 0],
+    ['Trakteer Klik', s.trakteerClicks || 0],
     ['Total Event Log', s.totalEvents || 0],
   ].map(([k, v]) => `<div class="card kpi"><span>${k}</span><b>${v}</b></div>`).join('');
 
@@ -146,6 +152,10 @@ async function load() {
   $('choices').innerHTML = (d.eventChoices || []).length
     ? d.eventChoices.map(r => `<tr><td>${esc(r.eventId)}</td><td>${esc(r.choiceId)}</td><td class="r">${r.count}</td></tr>`).join('')
     : '<tr><td colspan="3" style="color:var(--muted)">Belum ada data.</td></tr>';
+
+  $('feedbacks').innerHTML = (d.feedbacks || []).length
+    ? d.feedbacks.map(r => `<tr><td style="white-space:nowrap;color:var(--muted)">${esc((r.created_at || '').slice(0, 16))}</td><td>${esc(r.category)}</td><td>${esc(r.message)}</td><td>${esc(r.device)}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--muted)">Belum ada masukan.</td></tr>';
 }
 
 $('login-form').addEventListener('submit', e => {
