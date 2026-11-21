@@ -162,10 +162,6 @@ export default {
       return json({ error: 'Method not allowed' }, 405);
     }
 
-    if (url.pathname === '/dashboard') {
-      return env.ASSETS.fetch(new Request(new URL('/dashboard.html', url), request));
-    }
-
     return env.ASSETS.fetch(request);
   },
 };
