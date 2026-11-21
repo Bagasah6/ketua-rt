@@ -1,8 +1,18 @@
 {
   "name": "ketua-rt",
+  "main": "worker.js",
   "compatibility_date": "2026-11-20",
   "assets": {
-    "directory": "."
+    "directory": ".",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/dashboard"]
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ketua-rt-analytics",
+      "database_id": "8f1e9c63-2c5d-4d69-a983-04be3c956ed6"
+    }
+  ],
   "previews": {}
 }
