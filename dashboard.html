@@ -139,7 +139,7 @@ const KEY = 'rt-admin-token';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const wibToday = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10);
-const state = { period: 'day', date: wibToday, month: wibToday.slice(0, 7), slot: 'all' };
+const state = { period: 'day', date: wibToday, month: wibToday.slice(0, 7), slot: 'all', withRet: false };
 const SLOT_DEFS = [
   ['dinihari', 'Dinihari (00.00-06.00)'],
   ['pagi', 'Pagi (06.01-11.00)'],
@@ -175,6 +175,7 @@ async function load(fresh = false) {
   syncFilterUI();
   const qs = new URLSearchParams({ period: state.period, date: state.date, month: state.month, slot: state.slot });
   if (fresh) qs.set('fresh', '1');
+  if (state.withRet) qs.set('ret', '1');
   const res = await fetch('/api/stats?' + qs.toString(), { headers: { authorization: 'Bearer ' + tok } });
   if (res.status === 401) {
     sessionStorage.removeItem(KEY);
@@ -203,29 +204,34 @@ async function load(fresh = false) {
   const tutPct = (tutDone + tutSkip) ? Math.round(tutDone / (tutDone + tutSkip) * 100) + '%' : '-';
   const compPct = s.startedPlayers ? Math.round((s.completedPlayers || 0) / s.startedPlayers * 100) + '%' : '-';
 
-  const ret = d.retention || {};
-  const retTot = ret.totalScoped || 0;
+  const ret = d.retention;
+  const retTot = ret ? (ret.totalScoped || 0) : 0;
   const retPct = retTot ? Math.round((ret.returningPlayers || 0) / retTot * 100) + '%' : '-';
-  const d1Pct = ret.d1Eligible ? Math.round((ret.d1Retained || 0) / ret.d1Eligible * 100) + '%' : '-';
-  const d7Pct = ret.d7Eligible ? Math.round((ret.d7Retained || 0) / ret.d7Eligible * 100) + '%' : '-';
+  const d1Pct = ret && ret.d1Eligible ? Math.round((ret.d1Retained || 0) / ret.d1Eligible * 100) + '%' : '-';
+  const d7Pct = ret && ret.d7Eligible ? Math.round((ret.d7Retained || 0) / ret.d7Eligible * 100) + '%' : '-';
 
   $('kpis').innerHTML = [
     ['Pemain Unik', s.uniquePlayers || 0],
     ['Game Dimulai', s.startedPlayers || 0],
     ['Tamat 52 Minggu', `${s.completedPlayers || 0} (${compPct})`],
-    ['Returning (2+ Hari)', `${ret.returningPlayers || 0} (${retPct})`],
+    ['Returning (2+ Hari)', ret ? `${ret.returningPlayers || 0} (${retPct})` : 'Klik Hitung'],
     ['Tutorial Selesai', tutPct],
     ['Total Share', s.totalShares || 0],
     ['Trakteer Klik', s.trakteerClicks || 0],
     ['Total Event Log', s.totalEvents || 0],
   ].map(([k, v]) => `<div class="card kpi"><span>${k}</span><b>${v}</b></div>`).join('');
 
-  bars($('retention'), [
-    { label: 'Returning (2+ hari)', val: ret.returningPlayers || 0, sub: retPct },
-    { label: 'Pemain 1 Hari Saja', val: ret.singleDayPlayers || 0, sub: retTot ? Math.round((ret.singleDayPlayers || 0) / retTot * 100) + '%' : '-' },
-    { label: 'D1 Retention (H+1)', val: ret.d1Retained || 0, sub: `${d1Pct} dr ${ret.d1Eligible || 0}` },
-    { label: 'D7+ Retention (H+7)', val: ret.d7Retained || 0, sub: `${d7Pct} dr ${ret.d7Eligible || 0}` },
-  ], r => r.label, r => r.val, r => r.sub);
+  if (ret) {
+    bars($('retention'), [
+      { label: 'Returning (2+ hari)', val: ret.returningPlayers || 0, sub: retPct },
+      { label: 'Pemain 1 Hari Saja', val: ret.singleDayPlayers || 0, sub: retTot ? Math.round((ret.singleDayPlayers || 0) / retTot * 100) + '%' : '-' },
+      { label: 'D1 Retention (H+1)', val: ret.d1Retained || 0, sub: `${d1Pct} dr ${ret.d1Eligible || 0}` },
+      { label: 'D7+ Retention (H+7)', val: ret.d7Retained || 0, sub: `${d7Pct} dr ${ret.d7Eligible || 0}` },
+    ], r => r.label, r => r.val, r => r.sub);
+  } else {
+    $('retention').innerHTML = '<p style="color:var(--muted);font-size:13px;margin:0 0 10px">Dinonaktifkan otomatis agar hemat kuota D1.</p><button type="button" id="load-ret" class="sec">Hitung Retensi</button>';
+    $('load-ret').onclick = () => { state.withRet = true; safeLoad(); };
+  }
 
   const slotMap = new Map((d.timeSlots || []).map(x => [x.slot, x]));
   const slotRows = SLOT_DEFS.map(([id, label]) => {
@@ -306,11 +312,12 @@ const safeLoad = (fresh = false) => load(fresh).catch(err => {
 
 document.querySelectorAll('.seg button').forEach(btn => btn.addEventListener('click', () => {
   state.period = btn.dataset.p;
+  state.withRet = false;
   safeLoad();
 }));
-$('f-date').addEventListener('change', e => { if (e.target.value) { state.date = e.target.value; safeLoad(); } });
-$('f-month').addEventListener('change', e => { if (e.target.value) { state.month = e.target.value; safeLoad(); } });
-$('f-slot').addEventListener('change', e => { state.slot = e.target.value; safeLoad(); });
+$('f-date').addEventListener('change', e => { if (e.target.value) { state.date = e.target.value; state.withRet = false; safeLoad(); } });
+$('f-month').addEventListener('change', e => { if (e.target.value) { state.month = e.target.value; state.withRet = false; safeLoad(); } });
+$('f-slot').addEventListener('change', e => { state.slot = e.target.value; state.withRet = false; safeLoad(); });
 
 $('login-form').addEventListener('submit', e => {
   e.preventDefault();

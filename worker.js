@@ -143,7 +143,7 @@ function bind(stmt, params) {
   return params.length ? stmt.bind(...params) : stmt;
 }
 
-const STATS_CACHE_TTL = 600;
+const STATS_CACHE_TTL = 1800;
 
 async function handleStats(request, env, ctx) {
   const token = env.ADMIN_TOKEN;
@@ -157,8 +157,9 @@ async function handleStats(request, env, ctx) {
   const url = new URL(request.url);
   const f = buildTimeFilter(url);
   const fresh = url.searchParams.get('fresh') === '1';
+  const withRet = url.searchParams.get('ret') === '1';
   const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
-  const cacheUrl = `https://stats-cache.ketua-rt.internal/api/stats?period=${f.period}&date=${encodeURIComponent(url.searchParams.get('date') || '')}&month=${encodeURIComponent(url.searchParams.get('month') || '')}&slot=${f.slot}`;
+  const cacheUrl = `https://stats-cache.ketua-rt.internal/api/stats?period=${f.period}&date=${encodeURIComponent(url.searchParams.get('date') || '')}&month=${encodeURIComponent(url.searchParams.get('month') || '')}&slot=${f.slot}&ret=${withRet ? '1' : '0'}`;
   const cacheKey = new Request(cacheUrl);
 
   if (cache && !fresh) {
@@ -305,7 +306,7 @@ async function handleStats(request, env, ctx) {
       FROM events ${f.where}
       GROUP BY version ORDER BY players DESC
     `), f.params).all(),
-    bind(env.DB.prepare(retentionSql), f.where ? f.params : []).first(),
+    withRet ? bind(env.DB.prepare(retentionSql), f.where ? f.params : []).first() : Promise.resolve(null),
     bind(env.DB.prepare(`
       SELECT AVG(max_w) AS avgMaxWeek
       FROM (
@@ -330,7 +331,7 @@ async function handleStats(request, env, ctx) {
     timeSlots: timeSlots.results || [],
     timeline: timeline.results || [],
     versions: versions.results || [],
-    retention: retention || {},
+    retention: retention || null,
     avgMaxWeek: maxWeeks && maxWeeks.avgMaxWeek ? Math.round(maxWeeks.avgMaxWeek * 10) / 10 : 0,
   };
   const bodyStr = JSON.stringify(payload);
@@ -386,5 +387,11 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+  async scheduled(event, env) {
+    await env.DB.batch([
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_client ON events (client_id)'),
+      env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_name_created ON events (event_name, created_at)'),
+    ]);
   },
 };
