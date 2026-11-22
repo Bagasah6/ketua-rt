@@ -143,40 +143,29 @@ function bind(stmt, params) {
   return params.length ? stmt.bind(...params) : stmt;
 }
 
-const STATS_CACHE_TTL = 1800;
+const STATS_COOLDOWN_SEC = 300;
 
-async function handleStats(request, env, ctx) {
-  const token = env.ADMIN_TOKEN;
-  if (!token) return json({ error: 'ADMIN_TOKEN not configured' }, 503);
-  const auth = request.headers.get('authorization') || '';
-  if (auth !== `Bearer ${token}`) {
-    return json({ error: 'Unauthorized' }, 401);
-  }
+async function ensureSnapshotTable(db) {
+  await db.prepare(
+    'CREATE TABLE IF NOT EXISTS stats_snapshot (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)'
+  ).run();
+}
 
-  try {
-  const url = new URL(request.url);
-  const f = buildTimeFilter(url);
-  const fresh = url.searchParams.get('fresh') === '1';
-  const withRet = url.searchParams.get('ret') === '1';
-  const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
-  const cacheUrl = `https://stats-cache.ketua-rt.internal/api/stats?period=${f.period}&date=${encodeURIComponent(url.searchParams.get('date') || '')}&month=${encodeURIComponent(url.searchParams.get('month') || '')}&slot=${f.slot}&ret=${withRet ? '1' : '0'}`;
-  const cacheKey = new Request(cacheUrl);
+function getSnapshotKey(url, f, withRet) {
+  const hasExplicit = url.searchParams.has('period') || url.searchParams.has('date') || url.searchParams.has('month') || url.searchParams.has('slot') || url.searchParams.has('ret');
+  if (!hasExplicit) return 'main';
+  const dVal = f.period === 'day' ? (url.searchParams.get('date') || 'today') : f.period === 'month' ? (url.searchParams.get('month') || 'cur') : 'all';
+  const wibToday = new Date(Date.now() + 7 * 3600 * 1000).toISOString().slice(0, 10);
+  if (f.period === 'day' && (dVal === 'today' || dVal === wibToday) && f.slot === 'all' && !withRet) return 'main';
+  return `${f.period}:${dVal}:${f.slot}:${withRet ? 1 : 0}`;
+}
 
-  if (cache && !fresh) {
-    const hit = await cache.match(cacheKey);
-    if (hit) {
-      const hdrs = new Headers(hit.headers);
-      hdrs.set('cache-control', 'no-store');
-      hdrs.set('x-cache', 'HIT');
-      return new Response(hit.body, { status: 200, headers: hdrs });
-    }
-  }
-
+async function computeStats(env, url, f, withRet) {
   const timelineExpr = f.period === 'day'
-    ? `strftime('%H', ${WIB_EXPR})`
+    ? "strftime('%H', wib_dt)"
     : f.period === 'month'
-      ? `date(${WIB_EXPR})`
-      : `strftime('%Y-%m', ${WIB_EXPR})`;
+      ? 'date(wib_dt)'
+      : "strftime('%Y-%m', wib_dt)";
 
   const retentionSql = f.where
     ? `
@@ -226,20 +215,28 @@ async function handleStats(request, env, ctx) {
       FROM per_player
     `;
 
-  const [summary, devices, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, timeline, versions, retention, maxWeeks] = await Promise.all([
+  const [baseRows, tutorial, weeklyFunnel, eventChoices, shares, endings, feedbacks, timeSlots, retention, maxWeeks] = await Promise.all([
     bind(env.DB.prepare(`
+      WITH base AS (
+        SELECT client_id, event_name, device, version, ${WIB_EXPR} AS wib_dt
+        FROM events ${f.where}
+      )
       SELECT
-        COUNT(*) AS totalEvents,
-        COUNT(DISTINCT client_id) AS uniquePlayers,
-        COUNT(DISTINCT CASE WHEN event_name = 'game_start' THEN client_id END) AS startedPlayers,
-        COUNT(DISTINCT CASE WHEN event_name = 'game_ending' THEN client_id END) AS completedPlayers,
-        SUM(CASE WHEN event_name = 'share_click' THEN 1 ELSE 0 END) AS totalShares,
-        SUM(CASE WHEN event_name = 'trakteer_click' THEN 1 ELSE 0 END) AS trakteerClicks
-      FROM events ${f.where}
-    `), f.params).first(),
-    bind(env.DB.prepare(`
-      SELECT COALESCE(device, 'unknown') AS device, COUNT(DISTINCT client_id) AS players
-      FROM events ${f.where} GROUP BY device ORDER BY players DESC
+        'sum' AS grp,
+        '' AS k1,
+        COUNT(*) AS v1,
+        COUNT(DISTINCT client_id) AS v2,
+        COUNT(DISTINCT CASE WHEN event_name = 'game_start' THEN client_id END) AS v3,
+        COUNT(DISTINCT CASE WHEN event_name = 'game_ending' THEN client_id END) AS v4,
+        SUM(CASE WHEN event_name = 'share_click' THEN 1 ELSE 0 END) AS v5,
+        SUM(CASE WHEN event_name = 'trakteer_click' THEN 1 ELSE 0 END) AS v6
+      FROM base
+      UNION ALL
+      SELECT 'dev' AS grp, COALESCE(device, 'unknown') AS k1, COUNT(DISTINCT client_id) AS v1, COUNT(*) AS v2, 0, 0, 0, 0 FROM base GROUP BY k1
+      UNION ALL
+      SELECT 'ver' AS grp, COALESCE(NULLIF(version, ''), 'unknown') AS k1, COUNT(DISTINCT client_id) AS v1, 0, 0, 0, 0, 0 FROM base GROUP BY k1
+      UNION ALL
+      SELECT 'tl' AS grp, ${timelineExpr} AS k1, COUNT(DISTINCT client_id) AS v1, COUNT(*) AS v2, 0, 0, 0, 0 FROM base GROUP BY k1
     `), f.params).all(),
     bind(env.DB.prepare(`
       SELECT COALESCE(json_extract(payload, '$.status'), 'unknown') AS status, COUNT(*) AS count
@@ -296,16 +293,6 @@ async function handleStats(request, env, ctx) {
       FROM events ${f.periodWhere}
       GROUP BY slot
     `), f.periodParams).all(),
-    bind(env.DB.prepare(`
-      SELECT ${timelineExpr} AS label, COUNT(DISTINCT client_id) AS players, COUNT(*) AS events
-      FROM events ${f.where}
-      GROUP BY label ORDER BY label ASC
-    `), f.params).all(),
-    bind(env.DB.prepare(`
-      SELECT COALESCE(NULLIF(version, ''), 'unknown') AS version, COUNT(DISTINCT client_id) AS players
-      FROM events ${f.where}
-      GROUP BY version ORDER BY players DESC
-    `), f.params).all(),
     withRet ? bind(env.DB.prepare(retentionSql), f.where ? f.params : []).first() : Promise.resolve(null),
     bind(env.DB.prepare(`
       SELECT AVG(max_w) AS avgMaxWeek
@@ -318,10 +305,24 @@ async function handleStats(request, env, ctx) {
     `), f.params).first(),
   ]);
 
-  const payload = {
+  const rows = baseRows.results || [];
+  const sumRow = rows.find(r => r.grp === 'sum') || {};
+  const summary = {
+    totalEvents: sumRow.v1 || 0,
+    uniquePlayers: sumRow.v2 || 0,
+    startedPlayers: sumRow.v3 || 0,
+    completedPlayers: sumRow.v4 || 0,
+    totalShares: sumRow.v5 || 0,
+    trakteerClicks: sumRow.v6 || 0,
+  };
+  const devices = rows.filter(r => r.grp === 'dev').map(r => ({ device: r.k1, players: r.v1 })).sort((a, b) => b.players - a.players);
+  const versions = rows.filter(r => r.grp === 'ver').map(r => ({ version: r.k1, players: r.v1 })).sort((a, b) => b.players - a.players);
+  const timeline = rows.filter(r => r.grp === 'tl').map(r => ({ label: r.k1, players: r.v1, events: r.v2 })).sort((a, b) => String(a.label).localeCompare(String(b.label)));
+
+  return {
     filter: { period: f.period, slot: f.slot },
-    summary: summary || {},
-    devices: devices.results || [],
+    summary,
+    devices,
     tutorial: tutorial.results || [],
     weeklyFunnel: weeklyFunnel.results || [],
     eventChoices: eventChoices.results || [],
@@ -329,31 +330,75 @@ async function handleStats(request, env, ctx) {
     endings: endings.results || [],
     feedbacks: feedbacks.results || [],
     timeSlots: timeSlots.results || [],
-    timeline: timeline.results || [],
-    versions: versions.results || [],
+    timeline,
+    versions,
     retention: retention || null,
     avgMaxWeek: maxWeeks && maxWeeks.avgMaxWeek ? Math.round(maxWeeks.avgMaxWeek * 10) / 10 : 0,
   };
-  const bodyStr = JSON.stringify(payload);
-  if (cache) {
-    const toCache = new Response(bodyStr, {
-      status: 200,
-      headers: {
-        'content-type': 'application/json; charset=utf-8',
-        'cache-control': `public, max-age=${STATS_CACHE_TTL}`,
-      },
-    });
-    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(cache.put(cacheKey, toCache));
-    else await cache.put(cacheKey, toCache);
+}
+
+async function handleStats(request, env) {
+  const token = env.ADMIN_TOKEN;
+  if (!token) return json({ error: 'ADMIN_TOKEN not configured' }, 503);
+  const auth = request.headers.get('authorization') || '';
+  if (auth !== `Bearer ${token}`) {
+    return json({ error: 'Unauthorized' }, 401);
   }
-  return new Response(bodyStr, {
-    status: 200,
-    headers: {
-      'content-type': 'application/json; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-cache': 'MISS',
-    },
-  });
+  if (!env.DB) return json({ error: 'Database binding unavailable' }, 503);
+
+  try {
+    const url = new URL(request.url);
+    const f = buildTimeFilter(url);
+    const withRet = url.searchParams.get('ret') === '1';
+    const forceRefresh = (request.method === 'POST' && url.pathname === '/api/stats/refresh')
+      || url.searchParams.get('refresh') === '1'
+      || url.searchParams.get('fresh') === '1';
+    const key = getSnapshotKey(url, f, withRet);
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    let snap = null;
+    try {
+      snap = await env.DB.prepare('SELECT data, updated_at FROM stats_snapshot WHERE key = ?1').bind(key).first();
+    } catch {
+      await ensureSnapshotTable(env.DB);
+    }
+
+    if (!forceRefresh && snap) {
+      const parsed = JSON.parse(snap.data);
+      const retryAfter = Math.max(0, STATS_COOLDOWN_SEC - (nowSec - snap.updated_at));
+      return json(
+        { ...parsed, updatedAt: snap.updated_at, cooldownSeconds: STATS_COOLDOWN_SEC, retryAfter, throttled: false },
+        200,
+        { 'x-snapshot': 'HIT' }
+      );
+    }
+
+    if (forceRefresh && snap && (nowSec - snap.updated_at) < STATS_COOLDOWN_SEC) {
+      const parsed = JSON.parse(snap.data);
+      const retryAfter = STATS_COOLDOWN_SEC - (nowSec - snap.updated_at);
+      return json(
+        { ...parsed, updatedAt: snap.updated_at, cooldownSeconds: STATS_COOLDOWN_SEC, retryAfter, throttled: true },
+        200,
+        { 'x-snapshot': 'COOLDOWN' }
+      );
+    }
+
+    const data = await computeStats(env, url, f, withRet);
+    const dataStr = JSON.stringify(data);
+    try {
+      await env.DB.prepare('INSERT OR REPLACE INTO stats_snapshot (key, data, updated_at) VALUES (?1, ?2, ?3)')
+        .bind(key, dataStr, nowSec).run();
+    } catch {
+      await ensureSnapshotTable(env.DB);
+      await env.DB.prepare('INSERT OR REPLACE INTO stats_snapshot (key, data, updated_at) VALUES (?1, ?2, ?3)')
+        .bind(key, dataStr, nowSec).run();
+    }
+
+    return json(
+      { ...data, updatedAt: nowSec, cooldownSeconds: STATS_COOLDOWN_SEC, retryAfter: STATS_COOLDOWN_SEC, throttled: false },
+      200,
+      { 'x-snapshot': 'RECOMPUTED' }
+    );
   } catch (err) {
     return json({ error: (err && err.message) || 'Stats query error' }, 500);
   }
@@ -386,12 +431,18 @@ export default {
       return json({ error: 'Method not allowed' }, 405);
     }
 
+    if (url.pathname === '/api/stats/refresh') {
+      if (request.method === 'POST') return handleStats(request, env, ctx);
+      return json({ error: 'Method not allowed' }, 405);
+    }
+
     return env.ASSETS.fetch(request);
   },
   async scheduled(event, env) {
     await env.DB.batch([
       env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_client ON events (client_id)'),
       env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_name_created ON events (event_name, created_at)'),
+      env.DB.prepare('CREATE TABLE IF NOT EXISTS stats_snapshot (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
     ]);
   },
 };
