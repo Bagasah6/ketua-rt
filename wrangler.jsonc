@@ -14,5 +14,8 @@
       "database_id": "8f1e9c63-2c5d-4d69-a983-04be3c956ed6"
     }
   ],
+  "triggers": {
+    "crons": ["5 17 * * *"]
+  },
   "previews": {}
 }
