@@ -38,6 +38,9 @@ async function handleTrack(request, env) {
   if (!isAllowedOrigin(origin)) {
     return json({ error: 'Forbidden origin' }, 403);
   }
+  if (!env.DB) {
+    return json({ error: 'Database binding unavailable' }, 503, { 'access-control-allow-origin': origin });
+  }
   const cl = Number(request.headers.get('content-length') || 0);
   if (cl > MAX_BODY_BYTES) {
     return json({ error: 'Payload too large' }, 413);
@@ -74,11 +77,14 @@ async function handleTrack(request, env) {
   const payloadStr = cleanPayload ? JSON.stringify(cleanPayload) : null;
   const payload = payloadStr && payloadStr.length <= 1024 ? payloadStr : (payloadStr ? JSON.stringify({ truncated: true }) : null);
 
-  await env.DB.prepare(
-    'INSERT INTO events (client_id, event_name, week, version, device, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
-  ).bind(clientId, eventName, week, version, device, payload).run();
-
-  return new Response(null, { status: 204, headers: { 'access-control-allow-origin': origin } });
+  try {
+    await env.DB.prepare(
+      'INSERT INTO events (client_id, event_name, week, version, device, payload) VALUES (?1, ?2, ?3, ?4, ?5, ?6)'
+    ).bind(clientId, eventName, week, version, device, payload).run();
+    return new Response(null, { status: 204, headers: { 'access-control-allow-origin': origin } });
+  } catch (err) {
+    return json({ error: (err && err.message) || 'DB insert failed' }, 500, { 'access-control-allow-origin': origin });
+  }
 }
 
 const SLOT_RANGES = {
