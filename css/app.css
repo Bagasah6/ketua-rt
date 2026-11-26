@@ -29,16 +29,32 @@
 .srt-map{border:0;border-top-width:0;background:transparent;min-height:96px;padding:12px 5px 6px;justify-content:space-between;background-size:100% 100%;background-repeat:no-repeat}.srt-map__n,.srt-map__s{background:rgba(255,255,255,.92);border-radius:4px;padding:1px 4px;max-width:100%;color:var(--color-text)}
 .srt-map__lines{display:none}
 .srt-map--ujang{background-image:url(../assets/minigame/minigame-map-kuning.png)}
+.srt-map--ujang:hover,.srt-map--ujang:focus-visible,.srt-map--ujang.is-got{background-image:url(../assets/minigame/minigame-map-kuning-open.png)}
 .srt-map--dedi{background-image:url(../assets/minigame/minigame-map-hijau.png)}
+.srt-map--dedi:hover,.srt-map--dedi:focus-visible,.srt-map--dedi.is-got{background-image:url(../assets/minigame/minigame-map-hijau-open.png)}
 .srt-map--rina{background-image:url(../assets/minigame/minigame-map-biru.png)}
+.srt-map--rina:hover,.srt-map--rina:focus-visible,.srt-map--rina.is-got{background-image:url(../assets/minigame/minigame-map-biru-open.png)}
 .srt-map--arman{background-image:url(../assets/minigame/minigame-map-merah.png)}
+.srt-map--arman:hover,.srt-map--arman:focus-visible,.srt-map--arman.is-got{background-image:url(../assets/minigame/minigame-map-merah-open.png)}
 .kas-map{border:0;background:url(../assets/minigame/minigame-map-netral.png) center/100% 100% no-repeat}
+.kas-map:hover,.kas-map:focus-visible,.kas-map:active{background-image:url(../assets/minigame/minigame-map-netral-open.png)}
 .kas-map b,.kas-map span{background:rgba(255,255,255,.88);padding:1px 6px;border-radius:6px;line-height:1.25}
+.kas-row.is-ptr:before{width:14px;left:-15px;top:2px;bottom:2px;border-radius:0;background:url(../assets/minigame/minigame-penggaris-kayu.png) center/contain no-repeat}
+.kas-cell.is-circ{outline:0;border-radius:0;background:url(../assets/minigame/minigame-coretan-merah.png) center/100% 100% no-repeat}
+.kas-ok:not(.is-auto){border:0;border-radius:0;rotate:0deg;padding:1px 4px 1px 18px;color:#1f7a3f;background:url(../assets/minigame/minigame-centang-hijau.png) left center/14px 14px no-repeat}
 .kas-nota{border:0;box-shadow:none;background:url(../assets/minigame/minigame-kertas-bukti-kas.png) center/100% 100% no-repeat;padding:14px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.16))}
 .kas-book{border:0;box-shadow:none;background:url(../assets/minigame/minigame-halaman-buku-kas.png) center/100% 100% no-repeat;padding:14px 16px}
 .sur-note{border:0;box-shadow:none;background:url(../assets/minigame/minigame-kertas-catatan-bu-rina.png) center/100% 100% no-repeat;padding:14px 16px;filter:drop-shadow(0 2px 4px rgba(0,0,0,.16))}
-.sur-form{border:0;box-shadow:none;background:url(../assets/minigame/minigame-blanko-surat-pengantar.png) center/100% 100% no-repeat;padding:16px 14px}
+.sur-form{position:relative;border:0;box-shadow:none;background:url(../assets/minigame/minigame-blanko-surat-pengantar.png) center/100% 100% no-repeat;padding:16px 14px}
+.sur-form::after{content:"";position:absolute;top:10px;right:14px;width:72px;height:18px;pointer-events:none;background:url(../assets/minigame/minigame-pulpen.png) center/contain no-repeat;rotate:-8deg;opacity:.9}
+.sur-cap{border:1px solid rgba(0,0,0,.16);border-radius:10px;padding:6px 14px 6px 38px;color:var(--color-text);background:#fff url(../assets/minigame/minigame-stempel-alat.png) 10px center/22px 22px no-repeat}
+.sur-cap:disabled{border-style:dashed;border-color:var(--color-border);color:var(--color-text-muted);opacity:.65}
+.sur-cap.is-ok{border:0;padding:6px 14px;min-height:54px;color:#c8321f;background:url(../assets/minigame/minigame-cap-tinta.png) center/contain no-repeat}
 .pp-board{border:0;border-radius:12px;padding:16px;background:url(../assets/minigame/minigame-bingkai-papan.png) center/100% 100% no-repeat,url(../assets/minigame/minigame-papan-gabus.png) repeat;background-size:100% 100%,180px 180px}
 .pp-pin{width:18px;height:18px;margin-left:-9px;top:-2px;border-radius:0;background:url(../assets/minigame/minigame-pines-menancap.png) center/contain no-repeat;box-shadow:none}
+.pp-slot:has(.pp-card:active) .pp-pin,.pp-slot:has(.pp-card.is-bounce) .pp-pin{background-image:url(../assets/minigame/minigame-pines-tercabut.png);transform:translateY(-3px)}
 .pp-slot.is-gone .pp-pin{background:url(../assets/minigame/minigame-pines-lubang.png) center/contain no-repeat;border:none}
 .bg{background:url(../assets/minigame/minigame-langit-fajar.png) center/cover no-repeat,linear-gradient(180deg,#3b4a7a,#c98a6b 55%,#f4c98e)}
+.bg-ico{display:inline-grid;place-items:center;width:36px;height:36px;margin:0 auto}
+.bg-screen.is-off .bg-ico{background:url(../assets/minigame/minigame-alarm-mati.png) center/contain no-repeat}
+.bg-screen.is-off .bg-ico img{opacity:0}
