@@ -404,9 +404,121 @@ async function handleStats(request, env) {
   }
 }
 
+const CONTENT_CACHE_URL = 'https://content-cache.ketua-rt.internal/api/content';
+const CONTENT_CACHE_TTL = 600;
+const ALLOWED_CMS_KINDS = new Set(['event', 'political', 'season', 'whats_new']);
+
+async function ensureCmsTable(db) {
+  await db.prepare(
+    'CREATE TABLE IF NOT EXISTS cms_content (id TEXT PRIMARY KEY, kind TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL, updated_at INTEGER NOT NULL)'
+  ).run();
+}
+
+async function handlePublicContent(env, ctx) {
+  const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+  const cacheKey = new Request(CONTENT_CACHE_URL);
+  if (cache) {
+    const hit = await cache.match(cacheKey);
+    if (hit) {
+      const hdrs = new Headers(hit.headers);
+      hdrs.set('x-cache', 'HIT');
+      return new Response(hit.body, { status: 200, headers: hdrs });
+    }
+  }
+  if (!env.DB) return json({ items: [] }, 200, { 'cache-control': `public, max-age=${CONTENT_CACHE_TTL}` });
+
+  let rows = [];
+  try {
+    const res = await env.DB.prepare('SELECT id, kind, enabled, data, updated_at FROM cms_content ORDER BY updated_at DESC').all();
+    rows = res.results || [];
+  } catch {
+    await ensureCmsTable(env.DB);
+  }
+  const items = rows.map(r => {
+    let parsed = {};
+    try { parsed = JSON.parse(r.data); } catch {}
+    return { id: r.id, kind: r.kind, enabled: !!r.enabled, data: parsed, updated_at: r.updated_at };
+  });
+  const bodyStr = JSON.stringify({ items });
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': `public, max-age=${CONTENT_CACHE_TTL}`,
+    'x-cache': 'MISS',
+  };
+  if (cache) {
+    const toCache = new Response(bodyStr, { status: 200, headers });
+    if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(cache.put(cacheKey, toCache));
+    else await cache.put(cacheKey, toCache);
+  }
+  return new Response(bodyStr, { status: 200, headers });
+}
+
+async function handleAdminContent(request, env) {
+  const token = env.ADMIN_TOKEN;
+  if (!token) return json({ error: 'ADMIN_TOKEN not configured' }, 503);
+  const auth = request.headers.get('authorization') || '';
+  if (auth !== `Bearer ${token}`) return json({ error: 'Unauthorized' }, 401);
+  if (!env.DB) return json({ error: 'Database binding unavailable' }, 503);
+
+  try {
+    await ensureCmsTable(env.DB);
+    const url = new URL(request.url);
+    const cache = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+
+    if (request.method === 'GET') {
+      const res = await env.DB.prepare('SELECT id, kind, enabled, data, updated_at FROM cms_content ORDER BY updated_at DESC').all();
+      const items = (res.results || []).map(r => {
+        let parsed = {};
+        try { parsed = JSON.parse(r.data); } catch {}
+        return { id: r.id, kind: r.kind, enabled: !!r.enabled, data: parsed, updated_at: r.updated_at };
+      });
+      return json({ items });
+    }
+
+    if (request.method === 'POST') {
+      const body = await request.json();
+      const id = typeof body.id === 'string' ? body.id.trim().slice(0, 80) : '';
+      const kind = typeof body.kind === 'string' ? body.kind.trim() : '';
+      if (!id || !ALLOWED_CMS_KINDS.has(kind)) {
+        return json({ error: 'Invalid id or kind (story is read-only)' }, 400);
+      }
+      const enabled = body.enabled === false || body.enabled === 0 ? 0 : 1;
+      const dataStr = JSON.stringify(body.data && typeof body.data === 'object' ? body.data : {});
+      if (dataStr.length > 8192) return json({ error: 'Content too large' }, 413);
+      const nowSec = Math.floor(Date.now() / 1000);
+      await env.DB.prepare(
+        'INSERT OR REPLACE INTO cms_content (id, kind, enabled, data, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)'
+      ).bind(id, kind, enabled, dataStr, nowSec).run();
+      if (cache) await cache.delete(new Request(CONTENT_CACHE_URL));
+      return json({ ok: true, id, kind, enabled: !!enabled, updated_at: nowSec });
+    }
+
+    if (request.method === 'DELETE') {
+      const id = (url.searchParams.get('id') || '').trim();
+      if (!id) return json({ error: 'Missing id' }, 400);
+      await env.DB.prepare('DELETE FROM cms_content WHERE id = ?1').bind(id).run();
+      if (cache) await cache.delete(new Request(CONTENT_CACHE_URL));
+      return json({ ok: true, deleted: id });
+    }
+
+    return json({ error: 'Method not allowed' }, 405);
+  } catch (err) {
+    return json({ error: (err && err.message) || 'CMS error' }, 500);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === '/api/content') {
+      if (request.method === 'GET') return handlePublicContent(env, ctx);
+      return json({ error: 'Method not allowed' }, 405);
+    }
+
+    if (url.pathname === '/api/admin/content') {
+      return handleAdminContent(request, env);
+    }
 
     if (url.pathname === '/api/track') {
       if (request.method === 'OPTIONS') {
@@ -443,6 +555,7 @@ export default {
       env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_client ON events (client_id)'),
       env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_events_name_created ON events (event_name, created_at)'),
       env.DB.prepare('CREATE TABLE IF NOT EXISTS stats_snapshot (key TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
+      env.DB.prepare('CREATE TABLE IF NOT EXISTS cms_content (id TEXT PRIMARY KEY, kind TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL, updated_at INTEGER NOT NULL)'),
     ]);
   },
 };

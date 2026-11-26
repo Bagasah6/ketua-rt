@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS cms_content (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  data TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);

@@ -133,6 +133,26 @@
     <h2>Kritik &amp; Saran Terbaru (50)</h2>
     <table><thead><tr><th>Waktu</th><th>Kategori</th><th>Pesan</th><th>Device</th></tr></thead><tbody id="feedbacks"></tbody></table>
   </div>
+
+  <div class="card">
+    <div class="top" style="margin-bottom:10px">
+      <div>
+        <h2 style="margin:0">Kelola Konten (CMS · Edge Cached 10m)</h2>
+        <span style="color:var(--muted);font-size:12px">Event Kecil (Reguler &amp; Politik), Kalender Agenda Tahunan, dan What's New. Story Chain tetap <code>read-only</code> di kode.</span>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-bottom:8px">
+      <select id="cms-kind"><option value="event">Event Kecil (Reguler)</option><option value="political">Event Politik</option><option value="season">Kalender Agenda Tahunan</option><option value="whats_new">What's New</option></select>
+      <input id="cms-id" placeholder="ID (mis. smoke_empty_lot / ramadan / main)" style="margin:0">
+      <select id="cms-en"><option value="1">Aktif (On)</option><option value="0">Nonaktif (Off)</option></select>
+    </div>
+    <textarea id="cms-json" rows="4" style="width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font:12px/1.4 monospace" placeholder='{"title":"Judul","desc":"Deskripsi..."}'></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button type="button" id="cms-save">Simpan Konten</button>
+      <span id="cms-msg" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <table style="margin-top:12px"><thead><tr><th>ID</th><th>Tipe</th><th>Status</th><th>Ringkasan</th><th class="r">Aksi</th></tr></thead><tbody id="cms-list"></tbody></table>
+  </div>
 </div>
 
 <script>
@@ -359,7 +379,72 @@ $('login-form').addEventListener('submit', e => {
 });
 $('refresh').addEventListener('click', () => safeLoad(true));
 $('logout').addEventListener('click', () => { sessionStorage.removeItem(KEY); safeLoad(); });
-safeLoad();
+
+async function loadCms() {
+  const tok = sessionStorage.getItem(KEY);
+  if (!tok) return;
+  const res = await fetch('/api/admin/content', { headers: { authorization: 'Bearer ' + tok } });
+  if (!res.ok) return;
+  const { items = [] } = await res.json();
+  $('cms-list').innerHTML = items.length ? items.map(it => `
+    <tr>
+      <td><code>${esc(it.id)}</code></td>
+      <td>${esc(it.kind)}</td>
+      <td>${it.enabled ? 'On' : 'Off'}</td>
+      <td>${esc(it.data && (it.data.title || it.data.version || JSON.stringify(it.data).slice(0, 50)))}</td>
+      <td class="r">
+        <button type="button" class="sec" data-cms-edit="${esc(it.id)}">Edit</button>
+        <button type="button" class="sec" data-cms-tog="${esc(it.id)}">${it.enabled ? 'Off' : 'On'}</button>
+        <button type="button" class="sec" data-cms-del="${esc(it.id)}">Hapus</button>
+      </td>
+    </tr>
+  `).join('') : '<tr><td colspan="5" style="color:var(--muted)">Belum ada konten override/kustom.</td></tr>';
+  $('cms-list').querySelectorAll('[data-cms-edit]').forEach(b => b.onclick = () => {
+    const it = items.find(x => x.id === b.dataset.cmsEdit);
+    if (!it) return;
+    $('cms-kind').value = it.kind;
+    $('cms-id').value = it.id;
+    $('cms-en').value = it.enabled ? '1' : '0';
+    $('cms-json').value = JSON.stringify(it.data || {}, null, 2);
+  });
+  $('cms-list').querySelectorAll('[data-cms-tog]').forEach(b => b.onclick = async () => {
+    const it = items.find(x => x.id === b.dataset.cmsTog);
+    if (!it) return;
+    await fetch('/api/admin/content', {
+      method: 'POST',
+      headers: { authorization: 'Bearer ' + tok, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: it.id, kind: it.kind, enabled: !it.enabled, data: it.data }),
+    });
+    loadCms();
+  });
+  $('cms-list').querySelectorAll('[data-cms-del]').forEach(b => b.onclick = async () => {
+    await fetch('/api/admin/content?id=' + encodeURIComponent(b.dataset.cmsDel), {
+      method: 'DELETE',
+      headers: { authorization: 'Bearer ' + tok },
+    });
+    loadCms();
+  });
+}
+
+$('cms-save').addEventListener('click', async () => {
+  const tok = sessionStorage.getItem(KEY);
+  if (!tok) return;
+  const id = $('cms-id').value.trim();
+  const kind = $('cms-kind').value;
+  const enabled = $('cms-en').value === '1';
+  let data = {};
+  try { data = JSON.parse($('cms-json').value || '{}'); } catch { $('cms-msg').textContent = 'JSON tidak valid.'; return; }
+  const res = await fetch('/api/admin/content', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + tok, 'content-type': 'application/json' },
+    body: JSON.stringify({ id, kind, enabled, data }),
+  });
+  const j = await res.json();
+  $('cms-msg').textContent = res.ok ? `✓ Tersimpan (${j.id})` : `Gagal: ${j.error || res.status}`;
+  if (res.ok) loadCms();
+});
+
+safeLoad().then(() => loadCms());
 </script>
 </body>
 </html>
